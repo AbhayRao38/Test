@@ -34,15 +34,20 @@ if nltk_data_dir not in nltk.data.path:
 try:
     stopword_set = set(stopwords.words('english'))
 except LookupError:
-    nltk.download('stopwords', download_dir=nltk_data_dir)
-    stopword_set = set(stopwords.words('english'))
+    try:
+        nltk.download('stopwords', download_dir=nltk_data_dir)
+        stopword_set = set(stopwords.words('english'))
+    except Exception:
+        # Fallback to basic stopwords if NLTK fails
+        stopword_set = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'is', 'are', 'was', 'were', 'be', 'been', 'being'}
 except Exception:
-    stopword_set = set()
+    # Fallback to basic stopwords
+    stopword_set = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'is', 'are', 'was', 'were', 'be', 'been', 'being'}
 
 class RetrievalAugmentor:
     """
     Enhanced retrieval system with persistent index, intelligent chunking, semantic reranking,
-    robust error handling, and thread-safe operations.
+    robust error handling, thread-safe operations, and academic quality filtering.
     """
     
     _instance = None
@@ -73,7 +78,7 @@ class RetrievalAugmentor:
         self.logger = self._get_logger()
         self._file_lock = threading.RLock()
         
-        self.logger.info("Initializing RetrievalAugmentor...")
+        self.logger.info("Initializing Enhanced RetrievalAugmentor...")
         
         # Ensure the directory for index and metadata exists
         os.makedirs(os.path.dirname(self.index_path), exist_ok=True)
@@ -90,6 +95,14 @@ class RetrievalAugmentor:
         # Initialize stopwords from global set
         self.stop_words = stopword_set
         
+        # Academic quality filters
+        self.academic_terms = [
+            'algorithm', 'method', 'approach', 'technique', 'process',
+            'system', 'model', 'theory', 'principle', 'concept',
+            'definition', 'example', 'application', 'analysis',
+            'research', 'study', 'framework', 'implementation'
+        ]
+        
         # Load existing index and metadata
         self._load_index_and_metadata()
         
@@ -97,8 +110,12 @@ class RetrievalAugmentor:
         self.stats = {
             'total_chunks': len(self.metadata),
             'total_queries': 0,
-            'successful_retrievals': 0
+            'successful_retrievals': 0,
+            'high_quality_chunks': 0
         }
+        
+        # Calculate high quality chunks
+        self.stats['high_quality_chunks'] = sum(1 for chunk in self.metadata if chunk.get('quality_score', 0) >= 4)
         
         # Save metadata on successful initialization
         if self.metadata:
@@ -207,29 +224,8 @@ class RetrievalAugmentor:
         except Exception as e:
             self.logger.error(f"Failed to save metadata: {e}")
 
-    def reload_index(self):
-        """Reload index and metadata from disk only if needed."""
-        with self._file_lock:
-            # Check if files have been modified since last load
-            try:
-                index_mtime = os.path.getmtime(self.index_path) if os.path.exists(self.index_path) else 0
-                metadata_mtime = os.path.getmtime(self.metadata_path) if os.path.exists(self.metadata_path) else 0
-                
-                # Only reload if files are newer than our current state
-                if hasattr(self, '_last_load_time'):
-                    if index_mtime <= self._last_load_time and metadata_mtime <= self._last_load_time:
-                        return  # No need to reload
-                
-                self._load_index_and_metadata()
-                self._last_load_time = max(index_mtime, metadata_mtime)
-                
-            except Exception as e:
-                self.logger.warning(f"Error checking file modification times: {e}")
-                # Fallback to always reload
-                self._load_index_and_metadata()
-
     def build_or_update_index_from_pdf(self, pdf_path, source_name=None, force_rebuild=False):
-        """Enhanced PDF indexing with intelligent chunking and comprehensive error handling."""
+        """Enhanced PDF indexing with intelligent chunking and academic quality filtering."""
         if not os.path.exists(pdf_path):
             raise FileNotFoundError(f"PDF not found: {pdf_path}")
         
@@ -258,23 +254,28 @@ class RetrievalAugmentor:
             chunks = self._create_intelligent_chunks(cleaned_text, source_name)
             print(f"Created {len(chunks)} intelligent chunks")
             
-            if not chunks:
-                print("No valid chunks created")
+            # Filter for academic quality
+            high_quality_chunks = self._filter_academic_quality(chunks)
+            print(f"Filtered to {len(high_quality_chunks)} high-quality academic chunks")
+            
+            if not high_quality_chunks:
+                print("No high-quality academic chunks created")
                 return
             
             print("Generating embeddings...")
-            chunk_texts = [chunk['text'] for chunk in chunks]
+            chunk_texts = [chunk['text'] for chunk in high_quality_chunks]
             embeddings = self._generate_embeddings_batch(chunk_texts)
             
             if embeddings is None:
                 print("Failed to generate embeddings")
                 return
             
-            self._update_index_with_chunks(chunks, embeddings)
+            self._update_index_with_chunks(high_quality_chunks, embeddings)
             self._save_index_and_metadata()
             
-            print(f"Successfully indexed {len(chunks)} chunks from {source_name}")
+            print(f"Successfully indexed {len(high_quality_chunks)} high-quality chunks from {source_name}")
             self.stats['total_chunks'] = len(self.metadata)
+            self.stats['high_quality_chunks'] = sum(1 for chunk in self.metadata if chunk.get('quality_score', 0) >= 4)
             
         except Exception as e:
             error_msg = f"Failed to index PDF {source_name}: {e}"
@@ -301,10 +302,11 @@ class RetrievalAugmentor:
         return "\n".join(text_blocks)
 
     def _clean_and_preprocess_text(self, text):
-        """Clean and preprocess extracted text."""
+        """Clean and preprocess extracted text with academic focus."""
         if not text:
             return ""
         
+        # Basic cleaning
         text = re.sub(r'\s+', ' ', text)
         text = re.sub(r'\bpage\s+\d+\b', '', text, flags=re.IGNORECASE)
         text = re.sub(r'\bchapter\s+\d+\b', '', text, flags=re.IGNORECASE)
@@ -312,14 +314,24 @@ class RetrievalAugmentor:
         text = re.sub(r'\bfigure\s+\d+(\.\d+)*\b', '', text, flags=re.IGNORECASE)
         text = re.sub(r'\btable\s+\d+(\.\d+)*\b', '', text, flags=re.IGNORECASE)
         text = re.sub(r'\bfig\.\s*\d+\b', '', text, flags=re.IGNORECASE)
+        
+        # Remove excessive punctuation
         text = re.sub(r'[.]{3,}', '...', text)
         text = re.sub(r'[-]{3,}', '---', text)
         text = re.sub(r'[=]{3,}', '===', text)
+        
+        # Remove standalone numbers (often page numbers)
         text = re.sub(r'\b\d+\b(?=\s|$)', '', text)
+        
+        # Remove URLs and email addresses
         text = re.sub(r'http[s]?://\S+', '', text)
         text = re.sub(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b', '', text)
+        
+        # Normalize quotes
         text = re.sub(r'["""]', '"', text)
         text = re.sub(r"[''']", "'", text)
+        
+        # Final whitespace cleanup
         text = re.sub(r'\s+', ' ', text)
         
         return text.strip()
@@ -331,7 +343,13 @@ class RetrievalAugmentor:
         
         chunks = []
         try:
-            sentences = sent_tokenize(text)
+            # Use simple sentence splitting as fallback if NLTK fails
+            try:
+                sentences = sent_tokenize(text)
+            except:
+                sentences = re.split(r'[.!?]+', text)
+                sentences = [s.strip() for s in sentences if s.strip()]
+            
             if not sentences:
                 return self._create_simple_chunks(text, source_name)
             
@@ -415,11 +433,13 @@ class RetrievalAugmentor:
         word_count = len(text.split())
         char_count = len(text)
         
-        if word_count < 10:
+        # Minimum word count filter
+        if word_count < 15:
             return None
         
+        # Character quality filter
         alpha_ratio = sum(c.isalpha() for c in text) / max(len(text), 1)
-        if alpha_ratio < 0.5:
+        if alpha_ratio < 0.6:  # Increased threshold for academic content
             return None
         
         return {
@@ -433,34 +453,72 @@ class RetrievalAugmentor:
         }
 
     def _calculate_quality_score(self, text):
-        """Calculate quality score for a chunk."""
+        """Calculate quality score for a chunk with academic focus."""
         score = 0
         word_count = len(text.split())
+        text_lower = text.lower()
         
-        if 50 <= word_count <= 300:
+        # Length scoring (prefer medium-length chunks)
+        if 60 <= word_count <= 250:
+            score += 3
+        elif 30 <= word_count < 60 or 250 < word_count <= 400:
             score += 2
-        elif 20 <= word_count < 50 or 300 < word_count <= 500:
+        elif 15 <= word_count < 30:
             score += 1
         
-        academic_terms = [
-            'algorithm', 'method', 'approach', 'technique', 'process',
-            'system', 'model', 'theory', 'principle', 'concept',
-            'definition', 'example', 'application', 'analysis'
-        ]
-        text_lower = text.lower()
-        academic_score = sum(1 for term in academic_terms if term in text_lower)
-        score += min(academic_score, 3)
+        # Academic term bonus
+        academic_score = sum(1 for term in self.academic_terms if term in text_lower)
+        score += min(academic_score, 4)
         
+        # Sentence structure bonus
         sentence_count = len([s for s in text.split('.') if s.strip()])
         if sentence_count >= 2:
+            score += 2
+        elif sentence_count == 1:
             score += 1
         
-        words = text.lower().split()
+        # Vocabulary diversity bonus
+        words = text_lower.split()
         unique_words = set(words)
-        if len(words) > 0 and len(unique_words) / len(words) > 0.7:
-            score += 1
+        if len(words) > 0:
+            diversity = len(unique_words) / len(words)
+            if diversity > 0.7:
+                score += 2
+            elif diversity > 0.5:
+                score += 1
         
-        return score
+        # Definition/explanation patterns bonus
+        definition_patterns = ['is a', 'is an', 'refers to', 'means', 'defined as', 'known as']
+        if any(pattern in text_lower for pattern in definition_patterns):
+            score += 2
+        
+        return min(score, 10)  # Cap at 10
+
+    def _filter_academic_quality(self, chunks):
+        """Filter chunks to keep only high academic quality ones."""
+        high_quality_chunks = []
+        
+        for chunk in chunks:
+            quality_score = chunk.get('quality_score', 0)
+            
+            # Only keep chunks with quality score >= 3
+            if quality_score >= 3:
+                # Additional filters for academic content
+                text_lower = chunk['text'].lower()
+                
+                # Must contain at least one academic term
+                has_academic_terms = any(term in text_lower for term in self.academic_terms)
+                
+                # Must have reasonable sentence structure
+                has_sentences = '.' in chunk['text'] or len(chunk['text'].split()) >= 20
+                
+                # Filter out chunks that are mostly numbers or symbols
+                alpha_ratio = sum(c.isalpha() for c in chunk['text']) / max(len(chunk['text']), 1)
+                
+                if has_academic_terms and has_sentences and alpha_ratio >= 0.7:
+                    high_quality_chunks.append(chunk)
+        
+        return high_quality_chunks
 
     def _generate_embeddings_batch(self, texts, batch_size=32):
         """Generate embeddings for a batch of texts."""
@@ -487,8 +545,8 @@ class RetrievalAugmentor:
         self.metadata.extend(chunks)
         print(f"✓ Added {len(chunks)} chunks to index")
 
-    def retrieve_context(self, query, top_k=5, min_score_threshold=0.3):
-        """Retrieve relevant context chunks for a query."""
+    def retrieve_context(self, query, top_k=5, min_score_threshold=0.4):
+        """Retrieve relevant context chunks for a query with academic quality filtering."""
         if self.index is None or not self.metadata:
             print("⚠ No index available for retrieval")
             return []
@@ -498,7 +556,7 @@ class RetrievalAugmentor:
         try:
             print(f"🔍 Retrieving context for: {query[:50]}...")
             query_embedding = self.model.encode([query], convert_to_numpy=True)
-            search_k = min(top_k * 3, len(self.metadata))
+            search_k = min(top_k * 4, len(self.metadata))  # Search more candidates
             distances, indices = self.index.search(query_embedding, search_k)
             
             similarities = 1 / (1 + distances[0])
@@ -507,23 +565,26 @@ class RetrievalAugmentor:
             for idx, similarity in zip(indices[0], similarities):
                 if 0 <= idx < len(self.metadata):
                     chunk = self.metadata[idx]
-                    candidates.append({
-                        'chunk': chunk,
-                        'similarity': similarity,
-                        'index': idx
-                    })
-            
-            candidates = [c for c in candidates if c['similarity'] >= min_score_threshold]
+                    # Only consider high-quality chunks
+                    if chunk.get('quality_score', 0) >= 3 and similarity >= min_score_threshold:
+                        candidates.append({
+                            'chunk': chunk,
+                            'similarity': similarity,
+                            'index': idx
+                        })
             
             if not candidates:
-                print(f"⚠ No chunks found above similarity threshold {min_score_threshold}")
+                print(f"⚠ No high-quality chunks found above similarity threshold {min_score_threshold}")
                 return []
             
-            reranked_candidates = self._enhanced_rerank_candidates(query, candidates)
+            # Enhanced reranking with academic focus
+            reranked_candidates = self._enhanced_academic_rerank(query, candidates)
             top_candidates = reranked_candidates[:top_k]
-            relevant_chunks = [c['chunk']['text'] for c in top_candidates]
             
-            print(f"✓ Retrieved {len(relevant_chunks)} relevant chunks")
+            # Deduplicate at sentence level
+            relevant_chunks = self._deduplicate_chunks([c['chunk']['text'] for c in top_candidates])
+            
+            print(f"✓ Retrieved {len(relevant_chunks)} relevant high-quality chunks")
             
             if relevant_chunks:
                 self.stats['successful_retrievals'] += 1
@@ -535,8 +596,8 @@ class RetrievalAugmentor:
             print(f"❌ {error_msg}")
             return []
 
-    def _enhanced_rerank_candidates(self, query, candidates):
-        """Enhanced reranking with domain awareness."""
+    def _enhanced_academic_rerank(self, query, candidates):
+        """Enhanced reranking with academic quality focus."""
         query_lower = query.lower()
         query_words = set(query_lower.split())
         query_words_filtered = query_words - self.stop_words
@@ -547,28 +608,65 @@ class RetrievalAugmentor:
             
             base_score = candidate['similarity']
             
+            # Keyword overlap bonus
             keyword_overlap = len(query_words_filtered & chunk_words)
-            keyword_bonus = keyword_overlap * 0.1
+            keyword_bonus = keyword_overlap * 0.15
             
-            quality_bonus = candidate['chunk'].get('quality_score', 0) * 0.05
+            # Quality score bonus
+            quality_bonus = candidate['chunk'].get('quality_score', 0) * 0.1
             
+            # Academic terms bonus
+            academic_bonus = sum(0.05 for term in self.academic_terms if term in chunk_text)
+            
+            # Length penalty for very short or very long chunks
             word_count = candidate['chunk']['word_count']
-            length_penalty = 0
             if word_count < 30:
-                length_penalty = -0.2
-            elif word_count > 400:
-                length_penalty = -0.1
+                length_penalty = -0.3
+            elif word_count > 300:
+                length_penalty = -0.15
+            else:
+                length_penalty = 0
             
-            academic_terms = [
-                'algorithm', 'method', 'approach', 'technique', 'process',
-                'definition', 'example', 'principle', 'concept'
-            ]
-            academic_bonus = sum(0.02 for term in academic_terms if term in chunk_text)
+            # Definition/explanation bonus
+            definition_patterns = ['is a', 'is an', 'refers to', 'means', 'defined as']
+            definition_bonus = 0.1 if any(pattern in chunk_text for pattern in definition_patterns) else 0
             
-            final_score = base_score + keyword_bonus + quality_bonus + length_penalty + academic_bonus
+            final_score = base_score + keyword_bonus + quality_bonus + academic_bonus + length_penalty + definition_bonus
             candidate['final_score'] = final_score
         
         return sorted(candidates, key=lambda x: x['final_score'], reverse=True)
+
+    def _deduplicate_chunks(self, chunks):
+        """Remove chunks with duplicate sentences."""
+        if not chunks:
+            return chunks
+        
+        seen_sentences = set()
+        deduplicated_chunks = []
+        
+        for chunk in chunks:
+            # Split chunk into sentences
+            sentences = re.split(r'[.!?]+', chunk)
+            unique_sentences = []
+            
+            for sentence in sentences:
+                sentence = sentence.strip()
+                if len(sentence) < 10:  # Skip very short sentences
+                    continue
+                
+                # Normalize sentence for comparison
+                normalized = re.sub(r'\s+', ' ', sentence.lower())
+                normalized = re.sub(r'[^\w\s]', '', normalized)
+                
+                if normalized not in seen_sentences:
+                    unique_sentences.append(sentence)
+                    seen_sentences.add(normalized)
+            
+            if unique_sentences:
+                deduplicated_chunk = '. '.join(unique_sentences) + '.'
+                deduplicated_chunks.append(deduplicated_chunk)
+        
+        return deduplicated_chunks
 
     def get_index_stats(self):
         """Get comprehensive index statistics."""
@@ -580,6 +678,7 @@ class RetrievalAugmentor:
                 'index_size': 0,
                 'avg_chunk_words': 0,
                 'avg_quality_score': 0,
+                'high_quality_chunks': 0,
                 'total_queries': self.stats['total_queries'],
                 'successful_retrievals': self.stats['successful_retrievals'],
                 'success_rate': 0
@@ -588,6 +687,7 @@ class RetrievalAugmentor:
         sources = set(chunk.get('source', 'unknown') for chunk in self.metadata)
         word_counts = [chunk.get('word_count', 0) for chunk in self.metadata]
         quality_scores = [chunk.get('quality_score', 0) for chunk in self.metadata]
+        high_quality_count = sum(1 for chunk in self.metadata if chunk.get('quality_score', 0) >= 4)
         
         stats = {
             'total_chunks': len(self.metadata),
@@ -596,6 +696,7 @@ class RetrievalAugmentor:
             'index_size': self.index.ntotal if self.index else 0,
             'avg_chunk_words': np.mean(word_counts) if word_counts else 0,
             'avg_quality_score': np.mean(quality_scores) if quality_scores else 0,
+            'high_quality_chunks': high_quality_count,
             'total_queries': self.stats['total_queries'],
             'successful_retrievals': self.stats['successful_retrievals'],
             'success_rate': (self.stats['successful_retrievals'] / max(self.stats['total_queries'], 1)) * 100
@@ -609,6 +710,7 @@ class RetrievalAugmentor:
         print("📊 Retrieval Index Statistics:")
         print("-" * 40)
         print(f"Total chunks: {stats['total_chunks']}")
+        print(f"High-quality chunks: {stats['high_quality_chunks']}")
         print(f"Total sources: {stats['total_sources']}")
         print(f"Index size: {stats['index_size']}")
         print(f"Average chunk words: {stats['avg_chunk_words']:.1f}")
@@ -621,7 +723,8 @@ class RetrievalAugmentor:
             print(f"\nSources:")
             for source in stats['sources']:
                 source_chunks = [c for c in self.metadata if c.get('source') == source]
-                print(f"   • {source}: {len(source_chunks)} chunks")
+                hq_chunks = [c for c in source_chunks if c.get('quality_score', 0) >= 4]
+                print(f"   • {source}: {len(source_chunks)} chunks ({len(hq_chunks)} high-quality)")
 
     def search_chunks(self, query, max_results=10):
         """Search chunks and return detailed results."""
@@ -648,8 +751,10 @@ class RetrievalAugmentor:
                         'preview': chunk['text'][:200] + "..." if len(chunk['text']) > 200 else chunk['text']
                     })
             
+            # Sort by similarity and filter for quality
             results.sort(key=lambda x: x['similarity'], reverse=True)
-            return results[:max_results]
+            high_quality_results = [r for r in results if r['quality_score'] >= 3]
+            return high_quality_results[:max_results]
             
         except Exception as e:
             print(f"Chunk search failed: {e}")
@@ -686,6 +791,7 @@ class RetrievalAugmentor:
                         self._save_index_and_metadata()
                         print(f"✅ Successfully removed source: {source_name}")
                         self.stats['total_chunks'] = len(self.metadata)
+                        self.stats['high_quality_chunks'] = sum(1 for chunk in self.metadata if chunk.get('quality_score', 0) >= 4)
                         return True
                     else:
                         print("❌ Failed to rebuild index")
@@ -695,6 +801,7 @@ class RetrievalAugmentor:
                     self._save_index_and_metadata()
                     print(f"✅ Removed last source: {source_name}")
                     self.stats['total_chunks'] = 0
+                    self.stats['high_quality_chunks'] = 0
                     return True
                 
             except Exception as e:
@@ -705,7 +812,7 @@ class RetrievalAugmentor:
 
 # Example usage and testing
 if __name__ == "__main__":
-    print("Enhanced Retrieval Augmentor Test")
+    print("Enhanced Academic Retrieval Augmentor Test")
     print("=" * 50)
     
     # Initialize retrieval system
@@ -714,8 +821,10 @@ if __name__ == "__main__":
     # Print current stats
     retrieval.print_index_stats()
     
-    print("\nRetrieval Augmentor ready for use!")
-    print("Example usage:")
-    print("   retrieval.build_or_update_index_from_pdf('textbook.pdf')")
-    print("   chunks = retrieval.retrieve_context('machine learning', top_k=3)")
-    print("   results = retrieval.search_chunks('algorithms', max_results=5)")
+    print("\nAcademic Retrieval Augmentor ready for use!")
+    print("Features:")
+    print("  • Academic quality filtering")
+    print("  • Intelligent chunking")
+    print("  • Semantic reranking")
+    print("  • Deduplication")
+    print("  • Thread-safe operations")
