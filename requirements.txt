@@ -1,0 +1,30 @@
+# Core NLP and ML
+torch>=1.10.0
+transformers>=4.20.0
+sentence-transformers>=2.2.0
+faiss-cpu>=1.7.1
+scikit-learn>=0.24.2
+nltk>=3.6.2
+
+# PDF and OCR
+PyMuPDF>=1.18.19
+pytesseract>=0.3.8
+Pillow>=8.2.0
+python-magic>=0.4.24
+
+# Web and API
+fastapi>=0.78.0
+uvicorn[standard]>=0.18.2
+pydantic>=1.8.2
+python-multipart>=0.0.5
+httpx>=0.22.0
+
+# Logging and utility
+psutil>=5.8.0
+python-dotenv>=0.19.0
+
+# For evaluation metrics
+rouge-score>=0.0.4
+
+# For testing and coverage
+pytest>=6.2.5
