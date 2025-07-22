@@ -53,16 +53,24 @@ class ExtractiveCustomLLM:
         # Target word count based on mode and marks
         target_words = self._get_target_word_count(mode, marks)
         
+        # Detect query type for structured response
+        query_type = self._detect_query_type(query)
+        
         # Extract and rank relevant sentences
         relevant_sentences = self._extract_and_rank_sentences(query, context_chunks)
         
         if not relevant_sentences:
             return self._generate_fallback_response(query, mode, marks)
         
-        # Generate structured academic response
-        response = self._synthesize_academic_response(
-            query, relevant_sentences, target_words, mode
-        )
+        # Generate structured academic response based on query type
+        if query_type in ['explain', 'define', 'describe', 'what_is']:
+            response = self._generate_structured_academic_response(
+                query, context_chunks, target_words, mode
+            )
+        else:
+            response = self._synthesize_academic_response(
+                query, relevant_sentences, target_words, mode
+            )
         
         # Quality check and ensure minimum word count
         response = self._ensure_quality_and_length(response, target_words, query)
@@ -77,6 +85,22 @@ class ExtractiveCustomLLM:
             return 300
         else:
             return 200
+
+    def _detect_query_type(self, query):
+        """Detect the type of query to determine response structure."""
+        query_lower = query.lower().strip()
+        
+        # Patterns for different query types
+        if any(pattern in query_lower for pattern in ['what is', 'what are', 'define', 'definition of']):
+            return 'define'
+        elif any(pattern in query_lower for pattern in ['explain', 'how does', 'how do', 'describe']):
+            return 'explain'
+        elif query_lower.startswith('describe'):
+            return 'describe'
+        elif any(pattern in query_lower for pattern in ['tell me about', 'give me information about']):
+            return 'explain'
+        else:
+            return 'general'
 
     def _extract_and_rank_sentences(self, query, context_chunks):
         """Extract and rank sentences by relevance to query."""
@@ -172,6 +196,199 @@ class ExtractiveCustomLLM:
         intersection = len(words1 & words2)
         union = len(words1 | words2)
         return intersection / union if union > 0 else 0
+
+    def _generate_structured_academic_response(self, query, context_chunks, target_words, mode):
+        """Generate structured academic response with clear sections."""
+        # Extract all sentences from all chunks
+        all_sentences = []
+        for chunk in context_chunks:
+            sentences = re.split(r'[.!?]+', chunk)
+            for sentence in sentences:
+                sentence = sentence.strip()
+                if len(sentence) > 15:  # Minimum meaningful sentence length
+                    all_sentences.append(sentence)
+        
+        if not all_sentences:
+            return self._generate_fallback_response(query, mode, None)
+        
+        # Extract content for each section
+        sections = self._extract_academic_sections(query, all_sentences)
+        
+        # Build structured response
+        response_parts = []
+        
+        if sections['definition']:
+            response_parts.append("**Definition:**\n")
+            response_parts.append(self._format_section_content(sections['definition']))
+            response_parts.append("\n\n")
+        
+        if sections['explanation']:
+            response_parts.append("**Key Principles / Explanation:**\n")
+            response_parts.append(self._format_section_content(sections['explanation']))
+            response_parts.append("\n\n")
+        
+        if sections['applications']:
+            response_parts.append("**Applications:**\n")
+            response_parts.append(self._format_section_content(sections['applications']))
+            response_parts.append("\n\n")
+        
+        if sections['examples']:
+            response_parts.append("**Examples:**\n")
+            response_parts.append(self._format_section_content(sections['examples']))
+            response_parts.append("\n\n")
+        
+        if not response_parts:
+            # No structured content found, fall back to general synthesis
+            relevant_sentences = self._extract_and_rank_sentences(query, context_chunks)
+            return self._synthesize_academic_response(query, relevant_sentences, target_words, mode)
+        
+        # Combine and clean up
+        response = "".join(response_parts).strip()
+        
+        # Ensure minimum word count by adding general content if needed
+        current_words = len(response.split())
+        if current_words < 50 and len(all_sentences) > 0:
+            # Add some general relevant sentences
+            query_words = set(query.lower().split())
+            relevant_general = []
+            for sentence in all_sentences[:10]:  # Check first 10 sentences
+                sentence_words = set(sentence.lower().split())
+                if len(query_words & sentence_words) > 0:
+                    relevant_general.append(sentence)
+            
+            if relevant_general and len(response_parts) > 0:
+                response += "\n\n**Additional Information:**\n"
+                response += ". ".join(relevant_general[:3]) + "."
+        
+        return response
+
+    def _extract_academic_sections(self, query, sentences):
+        """Extract sentences for different academic sections."""
+        sections = {
+            'definition': [],
+            'explanation': [],
+            'applications': [],
+            'examples': []
+        }
+        
+        # Extract key terms from query for matching
+        query_lower = query.lower()
+        query_words = set(query_lower.split())
+        
+        # Patterns for each section
+        definition_patterns = [
+            r'\b\w+\s+is\s+(?:a|an)\s+',
+            r'\b\w+\s+refers\s+to\s+',
+            r'\b\w+\s+can\s+be\s+defined\s+as\s+',
+            r'\b\w+\s+means\s+',
+            r'definition\s+of\s+',
+            r'defined\s+as\s+',
+            r'known\s+as\s+'
+        ]
+        
+        explanation_patterns = [
+            r'\bworks?\s+by\b',
+            r'\bfunctions?\s+by\b',
+            r'\boperates?\s+by\b',
+            r'\bmechanism\b',
+            r'\bprinciple\b',
+            r'\bcharacteristic\b',
+            r'\bfeature\b',
+            r'\bproperty\b',
+            r'\bhow\s+it\s+works\b',
+            r'\bprocess\s+of\b'
+        ]
+        
+        application_patterns = [
+            r'\bapplicat\w+\b',
+            r'\bused\s+(?:in|for|to)\b',
+            r'\bapplied\s+(?:in|to)\b',
+            r'\breal.world\b',
+            r'\bpractical\b',
+            r'\butility\b',
+            r'\bbenefit\b',
+            r'\bimplement\w+\b',
+            r'\bindustry\b',
+            r'\bcommercial\b'
+        ]
+        
+        example_patterns = [
+            r'\bfor\s+example\b',
+            r'\bsuch\s+as\b',
+            r'\be\.g\.\b',
+            r'\bincluding\b',
+            r'\bfor\s+instance\b',
+            r'\bnamely\b',
+            r'\bspecifically\b'
+        ]
+        
+        used_sentences = set()
+        
+        for sentence in sentences:
+            sentence_clean = sentence.strip()
+            if not sentence_clean or len(sentence_clean) < 20:
+                continue
+            
+            sentence_lower = sentence_clean.lower()
+            
+            # Skip if already used
+            normalized = re.sub(r'\s+', ' ', sentence_lower.strip())
+            if normalized in used_sentences:
+                continue
+            
+            # Check relevance to query
+            sentence_words = set(sentence_lower.split())
+            relevance = len(query_words & sentence_words)
+            
+            if relevance == 0:
+                continue
+            
+            # Categorize sentence
+            if any(re.search(pattern, sentence_lower) for pattern in definition_patterns):
+                sections['definition'].append(sentence_clean)
+                used_sentences.add(normalized)
+            elif any(re.search(pattern, sentence_lower) for pattern in explanation_patterns):
+                sections['explanation'].append(sentence_clean)
+                used_sentences.add(normalized)
+            elif any(re.search(pattern, sentence_lower) for pattern in application_patterns):
+                sections['applications'].append(sentence_clean)
+                used_sentences.add(normalized)
+            elif any(re.search(pattern, sentence_lower) for pattern in example_patterns):
+                sections['examples'].append(sentence_clean)
+                used_sentences.add(normalized)
+            elif relevance >= 2:  # High relevance sentences go to explanation
+                sections['explanation'].append(sentence_clean)
+                used_sentences.add(normalized)
+        
+        # Limit sentences per section and prioritize by relevance
+        for section_name in sections:
+            if len(sections[section_name]) > 3:
+                # Sort by length and relevance, keep top 3
+                sections[section_name] = sections[section_name][:3]
+        
+        return sections
+
+    def _format_section_content(self, sentences):
+        """Format sentences for a section."""
+        if not sentences:
+            return ""
+        
+        # Remove duplicates while preserving order
+        unique_sentences = []
+        seen = set()
+        for sentence in sentences:
+            normalized = re.sub(r'\s+', ' ', sentence.lower().strip())
+            if normalized not in seen:
+                unique_sentences.append(sentence)
+                seen.add(normalized)
+        
+        if not unique_sentences:
+            return ""
+        
+        # Join sentences properly
+        formatted = ". ".join(s.rstrip('.') for s in unique_sentences) + "."
+        
+        return formatted
 
     def _synthesize_academic_response(self, query, relevant_sentences, target_words, mode):
         """Synthesize academic response from ranked sentences."""
@@ -512,22 +729,68 @@ class DialogGPTAcademicLLM:
         return '. '.join(unique_sentences) + '.' if unique_sentences else text
 
     def _final_quality_check(self, response, query, mode, marks):
-        """Final quality check with fallback if needed."""
+        """Final quality check with fallback if needed - less preemptive."""
         word_count = len(response.split())
         
         # Check minimum length
         if word_count < 20:
             return self._generate_fallback_response(query, mode, marks)
         
-        # Check for gibberish patterns
-        if self._is_gibberish(response):
+        # Check for gibberish patterns (more strict criteria)
+        if self._is_severe_gibberish(response):
             return self._generate_fallback_response(query, mode, marks)
         
-        # Check academic quality
-        if not self._has_academic_content(response):
+        # Only fallback if response is completely non-academic and very short
+        if word_count < 30 and not self._has_any_meaningful_content(response):
             return self._generate_fallback_response(query, mode, marks)
         
         return response
+
+    def _is_severe_gibberish(self, text):
+        """Check if text contains severe gibberish patterns - more strict than before."""
+        # Check for repeated characters (5+ repetitions)
+        if re.search(r'(.)\1{5,}', text):
+            return True
+        
+        # Check for excessive nonsensical character patterns
+        words = text.split()
+        nonsensical_words = 0
+        for word in words:
+            if len(word) > 4 and not re.match(r'^[a-zA-Z]+$', word):
+                nonsensical_words += 1
+        
+        # If more than 50% of words are nonsensical, it's severe gibberish
+        if words and nonsensical_words / len(words) > 0.5:
+            return True
+        
+        # Check for completely incoherent patterns
+        if re.search(r'[a-zA-Z]{15,}', text) and not re.search(r'\s', text):
+            return True
+        
+        return False
+
+    def _has_any_meaningful_content(self, text):
+        """Check if text has any meaningful content - less strict than academic check."""
+        text_lower = text.lower()
+        
+        # Basic meaningful indicators
+        meaningful_indicators = [
+            'is', 'are', 'was', 'were', 'the', 'a', 'an', 'and', 'or',
+            'definition', 'concept', 'principle', 'method', 'approach',
+            'theory', 'analysis', 'example', 'application', 'research',
+            'study', 'academic', 'knowledge', 'understanding', 'used',
+            'works', 'means', 'refers', 'includes', 'such', 'like'
+        ]
+        
+        # Must have at least some basic English structure
+        meaningful_count = sum(1 for indicator in meaningful_indicators if indicator in text_lower)
+        words = text_lower.split()
+        
+        if not words:
+            return False
+        
+        # At least 10% of words should be meaningful
+        return meaningful_count / len(words) >= 0.1
 
     def _is_gibberish(self, text):
         """Check if text contains gibberish patterns."""
